@@ -1,8 +1,9 @@
 import org.apache.http.NameValuePair;
+import org.apache.http.client.utils.URLEncodedUtils;
+
 import java.io.*;
 import java.nio.charset.StandardCharsets;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.stream.Collectors;
 
 public class Main {
@@ -184,6 +185,45 @@ public class Main {
                 e.printStackTrace();
                 Server.sendResponse(out, 500, "application/json",
                         "{\n  \"success\": false,\n  \"error\": \"" + e.getMessage() + "\"\n}");
+            }
+        });
+
+        server.addHandler("POST", "/form", (request, out) -> {
+            try {
+                // Проверка Content-Type
+                if (!request.isFormUrlEncoded()) {
+                    Server.sendResponse(out, 400, "Content-Type must be application/x-www-form-urlencoded");
+                    return;
+                }
+
+                // Чтение тела
+                String bodyStr;
+                try (InputStream bodyStream = request.getBody();
+                     BufferedReader reader = new BufferedReader(
+                             new InputStreamReader(bodyStream, StandardCharsets.UTF_8))) {
+                    bodyStr = reader.lines().collect(Collectors.joining("\n"));
+                }
+
+                System.out.println("Raw POST body: " + bodyStr);
+
+                // Парсинг параметров
+                List<NameValuePair> params = URLEncodedUtils.parse(bodyStr, StandardCharsets.UTF_8);
+                Map<String, List<String>> paramMap = new HashMap<>();
+
+                for (NameValuePair pair : params) {
+                    paramMap.computeIfAbsent(pair.getName(), k -> new ArrayList<>())
+                            .add(pair.getValue());
+                }
+
+                // Формирование ответа
+                String response = "Form data:\n" +
+                        "Name: " + paramMap.getOrDefault("name", List.of("null")).get(0) + "\n" +
+                        "Colors: " + String.join(", ", paramMap.getOrDefault("color", List.of("none")));
+
+                Server.sendResponse(out, 200, response);
+            } catch (Exception e) {
+                System.err.println("Error processing form: " + e.getMessage());
+                Server.sendResponse(out, 500, "Server error: " + e.getMessage());
             }
         });
 

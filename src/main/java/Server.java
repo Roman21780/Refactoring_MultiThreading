@@ -12,7 +12,7 @@ public class Server {
 
     // Увеличены таймауты для более стабильной работы
     private static final int SO_TIMEOUT = 60000; // 60 секунд для основного таймаута
-    private static final int HEADER_READ_TIMEOUT = 15000; // 15 секунд для чтения заголовков
+    private static final int HEADER_READ_TIMEOUT = 5000; // 15 секунд для чтения заголовков
     private static final int BODY_READ_TIMEOUT = 30000; // 30 секунд для чтения тела
 
     public Server() {
@@ -52,97 +52,52 @@ public class Server {
     }
 
     private void handleConnection(Socket socket) {
-        String clientAddress = socket.getInetAddress().getHostAddress() + ":" + socket.getPort();
-        System.out.println("New connection from " + clientAddress);
-
         try (socket;
              InputStream input = socket.getInputStream();
-             BufferedOutputStream output = new BufferedOutputStream(socket.getOutputStream())) {
+             OutputStream output = socket.getOutputStream()) {
 
-            // Увеличенный таймаут для чтения заголовков
-            socket.setSoTimeout(HEADER_READ_TIMEOUT);
+            // Отключаем таймаут для первоначального чтения
+            socket.setSoTimeout(0);
 
-            // Парсим запрос - передаем socket в качестве второго параметра
             Request request = parseRequest(input, socket);
-
-            // Проверяем валидность запроса
             if (request == null) {
-                System.out.println("Invalid request from " + clientAddress);
                 sendResponse(output, 400, "Bad Request");
                 return;
             }
 
-            // Восстанавливаем обычный таймаут для последующих операций
-            socket.setSoTimeout(SO_TIMEOUT);
-
-            // Логируем запрос
-            System.out.printf("%s %s from %s%n",
-                    request.getMethod(), request.getPath(), clientAddress);
-            System.out.println("Headers:");
-            request.getHeaders().forEach((k, v) -> System.out.println("  " + k + ": " + v));
-
-            // Обработка специальных запросов
-            if ("/favicon.ico".equals(request.getPath())) {
-                sendResponse(output, 204, "");
-                return;
-            }
-
-            if ("OPTIONS".equalsIgnoreCase(request.getMethod())) {
-                handleOptionsRequest(output, request.getPath());
-                return;
-            }
-
-            // Поиск обработчика
+            // Обработка запроса
             Handler handler = findHandler(request.getMethod(), request.getPath());
-            if (handler == null) {
-                System.out.println("No handler for " + request.getMethod() + " " + request.getPath());
-                sendResponse(output, 404, "Not Found");
-                return;
-            }
-
-            // Вызов обработчика
-            try {
-                System.out.println("Executing handler for " + request.getMethod() + " " + request.getPath());
+            if (handler != null) {
                 handler.handle(request, output);
-                System.out.println("Request processed successfully");
-            } catch (SocketTimeoutException e) {
-                System.err.println("Handler timeout: " + e.getMessage());
-                sendResponse(output, 408, "Request Timeout");
-            } catch (Exception e) {
-                System.err.println("Handler error: " + e.getMessage());
-                e.printStackTrace(); // Добавляем полный стек ошибки
-                sendResponse(output, 500, "Internal Server Error");
+            } else {
+                sendResponse(output, 404, "Not Found");
             }
 
         } catch (SocketTimeoutException e) {
-            System.out.println("Timeout with client " + clientAddress + ": " + e.getMessage());
+            System.err.println("Timeout: " + e.getMessage());
         } catch (IOException e) {
-            System.err.println("IO error with client " + clientAddress + ": " + e.getMessage());
-            e.printStackTrace(); // Добавляем вывод стека ошибки
+            System.err.println("IO Error: " + e.getMessage());
         } catch (Exception e) {
-            System.err.println("Unexpected error with client " + clientAddress + ": " + e.getMessage());
-            e.printStackTrace(); // Добавляем вывод стека ошибки
-        } finally {
-            System.out.println("Connection closed with " + clientAddress);
+            System.err.println("Unexpected error: " + e.getMessage());
+            e.printStackTrace();
         }
     }
 
     private Request parseRequest(InputStream inputStream, Socket socket) throws IOException {
-        // Читаем строку запроса
-        BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream, StandardCharsets.UTF_8));
-        String requestLine = reader.readLine();
+        // Используем BufferedInputStream для надежного чтения
+        BufferedInputStream bufferedInput = new BufferedInputStream(inputStream);
+        bufferedInput.mark(Integer.MAX_VALUE); // Помечаем начало для возможного reset()
 
-        // Проверка на пустую строку запроса
+        // Читаем первую строку без таймаута
+        String requestLine = readLine(bufferedInput);
         if (requestLine == null || requestLine.isEmpty()) {
             System.out.println("Empty request line");
             return null;
         }
 
         System.out.println("Raw request line: " + requestLine);
-
         String[] parts = requestLine.split(" ");
         if (parts.length != 3) {
-            System.out.println("Invalid request format: " + requestLine);
             return null;
         }
 
@@ -150,49 +105,55 @@ public class Server {
         String path = parts[1];
         Map<String, String> headers = new HashMap<>();
 
-        // Читаем заголовки до пустой строки
-        String line;
-        while ((line = reader.readLine()) != null && !line.isEmpty()) {
-            int separator = line.indexOf(':');
-            if (separator > 0) {
-                headers.put(
-                        line.substring(0, separator).trim().toLowerCase(), // Преобразуем к нижнему регистру для единообразия
-                        line.substring(separator + 1).trim()
-                );
+        // Чтение заголовков с таймаутом
+        socket.setSoTimeout(HEADER_READ_TIMEOUT);
+        String headerLine;
+        while (!(headerLine = readLine(bufferedInput)).isEmpty()) {
+            int colonPos = headerLine.indexOf(':');
+            if (colonPos > 0) {
+                String key = headerLine.substring(0, colonPos).trim().toLowerCase();
+                String value = headerLine.substring(colonPos + 1).trim();
+                headers.put(key, value);
             }
         }
 
-        // Логируем заголовки для отладки
-        System.out.println("Headers received: " + headers);
+        // Подготовка тела запроса
+        InputStream bodyStream = null;
+        int contentLength = 0;
 
-        // Обрабатываем тело запроса, если это POST, PUT или другой метод с телом
-        InputStream body = null;
-
-        if (("POST".equals(method) || "PUT".equals(method)) && headers.containsKey("content-length")) {
-            try {
-                int contentLength = Integer.parseInt(headers.get("content-length"));
-                System.out.println("Content-Length: " + contentLength);
-
-                if (contentLength > 0) {
-                    // Устанавливаем таймаут для чтения тела
-                    try {
-                        if (socket != null) {
-                            socket.setSoTimeout(BODY_READ_TIMEOUT);
-                            System.out.println("Set body read timeout to " + BODY_READ_TIMEOUT + "ms");
-                        }
-                    } catch (Exception e) {
-                        System.out.println("Could not set body read timeout: " + e.getMessage());
-                    }
-
-                    // Используем отдельное чтение сырых байтов вместо BufferedReader
-                    body = extractExactBodyContent(inputStream, contentLength);
-                }
-            } catch (NumberFormatException e) {
-                System.err.println("Invalid Content-Length header: " + e.getMessage());
-            }
+        try {
+            contentLength = Integer.parseInt(headers.getOrDefault("content-length", "0"));
+        } catch (NumberFormatException e) {
+            System.err.println("Invalid Content-Length");
         }
 
-        return new Request(method, path, headers, body);
+        if (contentLength > 0) {
+            // Чтение тела без таймаута (уже считали заголовки)
+            socket.setSoTimeout(0);
+            byte[] bodyBytes = new byte[contentLength];
+            int bytesRead = 0;
+
+            while (bytesRead < contentLength) {
+                int read = bufferedInput.read(bodyBytes, bytesRead, contentLength - bytesRead);
+                if (read == -1) break;
+                bytesRead += read;
+            }
+
+            bodyStream = new ByteArrayInputStream(bodyBytes);
+            System.out.println("Read body: " + bytesRead + " bytes");
+        }
+
+        return new Request(method, path, headers, bodyStream);
+    }
+
+    private String readLine(InputStream input) throws IOException {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        int b;
+        while ((b = input.read()) != -1) {
+            if (b == '\n') break;
+            if (b != '\r') baos.write(b);
+        }
+        return baos.toString(StandardCharsets.UTF_8.name());
     }
 
     // Улучшенный метод для точного чтения тела запроса заданной длины
@@ -200,34 +161,16 @@ public class Server {
         System.out.println("Trying to read " + contentLength + " bytes from request body");
 
         ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-        byte[] data = new byte[4096]; // Увеличен размер буфера для более эффективного чтения
-        int bytesRead;
+        byte[] data = new byte[Math.min(contentLength, 4096)];
         int totalBytesRead = 0;
-        long startTime = System.currentTimeMillis();
-        long timeoutMillis = BODY_READ_TIMEOUT;
 
-        // Читаем данные порциями с контролем времени
         while (totalBytesRead < contentLength) {
-            // Проверяем таймаут
-            if (System.currentTimeMillis() - startTime > timeoutMillis) {
-                System.out.println("Body read timeout after " + totalBytesRead + " bytes");
-                break;
-            }
-
-            // Определяем сколько еще нужно прочитать
-            int remaining = contentLength - totalBytesRead;
-            int maxToRead = Math.min(data.length, remaining);
-
-            try {
-                bytesRead = input.read(data, 0, maxToRead);
-            } catch (SocketTimeoutException e) {
-                System.out.println("Socket timeout while reading body after " + totalBytesRead + " bytes: " + e.getMessage());
-                break;
-            }
+            int bytesToRead = Math.min(data.length, contentLength - totalBytesRead);
+            int bytesRead = input.read(data, 0, bytesToRead);
 
             if (bytesRead == -1) {
-                System.out.println("End of stream reached after reading " + totalBytesRead + " bytes");
-                break; // Достигнут конец потока
+                System.out.println("End of stream reached after " + totalBytesRead + " bytes");
+                break;
             }
 
             buffer.write(data, 0, bytesRead);
@@ -238,14 +181,9 @@ public class Server {
         byte[] bodyContent = buffer.toByteArray();
         System.out.println("Body size: " + bodyContent.length + " bytes read");
 
-        // Для отладки выводим часть содержимого (первые 100 байт)
         if (bodyContent.length > 0) {
             String preview = new String(bodyContent, 0, Math.min(bodyContent.length, 100), StandardCharsets.UTF_8);
             System.out.println("Body preview: " + preview + (bodyContent.length > 100 ? "..." : ""));
-        }
-
-        if (bodyContent.length < contentLength) {
-            System.out.println("WARNING: Read only " + bodyContent.length + " bytes out of " + contentLength);
         }
 
         return new ByteArrayInputStream(bodyContent);
