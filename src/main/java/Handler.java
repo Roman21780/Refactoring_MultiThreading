@@ -1,7 +1,7 @@
-import java.io.BufferedOutputStream;
 import java.io.IOException;
+import java.io.OutputStream;
 
 @FunctionalInterface
-interface Handler {
-    void handle(Request request, BufferedOutputStream out) throws IOException;
+public interface Handler {
+    void handle(Request request, OutputStream responseStream) throws IOException;
 }

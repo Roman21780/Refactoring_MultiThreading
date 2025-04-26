@@ -43,9 +43,9 @@ public class Main {
         });
 
         // GET /data
-        server.addHandler("GET", "/data", (req, out) -> {
+        server.addHandler("GET", "/data", (request, out) -> {
             String response = "GET /data response\n" +
-                    "Query params: " + req.getQueryParams();
+                    "Query params: " + request.getQueryParams();
             Server.sendResponse(out, 200, response);
         });
 
@@ -59,35 +59,135 @@ public class Main {
             Server.sendResponse(out, 200, responseBody);
         });
 
-        // Универсальный POST обработчик для /data
+        // Улучшенный обработчик POST-запроса для /data
         server.addHandler("POST", "/data", (req, out) -> {
             try {
+                // Проверяем наличие заголовка Content-Length
+                if (!req.getHeaders().containsKey("content-length")) {
+                    System.out.println("Missing Content-Length header");
+                    Server.sendResponse(out, 400, "Missing Content-Length header");
+                    return;
+                }
+
                 // Читаем Content-Type
-                String contentType = req.getHeaders().getOrDefault("Content-Type", "text/plain");
+                String contentType = req.getHeaders().getOrDefault("content-type", "text/plain");
+                System.out.println("Processing POST request with Content-Type: " + contentType);
 
-                // Читаем тело запроса
-                String bodyContent;
-                try (BufferedReader reader = new BufferedReader(
-                        new InputStreamReader(req.getBody(), StandardCharsets.UTF_8))) {
-                    bodyContent = reader.lines().collect(Collectors.joining("\n"));
+                // Проверяем наличие тела запроса
+                if (req.getBody() == null) {
+                    System.out.println("Request body is missing");
+                    Server.sendResponse(out, 400, "Request body is missing");
+                    return;
                 }
 
-                // Формируем ответ в зависимости от Content-Type
-                String response;
-                if (contentType.contains("application/json")) {
-                    response = "JSON received: " + bodyContent;
-                } else {
-                    response = "Text received: " + bodyContent;
+                // Безопасно получаем Content-Length
+                int contentLength;
+                try {
+                    contentLength = Integer.parseInt(req.getHeaders().get("content-length"));
+                    if (contentLength <= 0) {
+                        Server.sendResponse(out, 400, "Invalid Content-Length: must be positive");
+                        return;
+                    }
+                } catch (NumberFormatException e) {
+                    Server.sendResponse(out, 400, "Invalid Content-Length format");
+                    return;
                 }
 
+                // Чтение тела запроса с обработкой исключений и ограничением по времени
+                byte[] bodyBytes = new byte[contentLength];
+                int totalBytesRead = 0;
+                long startTime = System.currentTimeMillis();
+                long timeoutMillis = 10000; // 10 секунд максимум для чтения
+
+                try (InputStream bodyStream = req.getBody()) {
+                    int bytesRead;
+                    while (totalBytesRead < contentLength &&
+                            (System.currentTimeMillis() - startTime) < timeoutMillis) {
+
+                        // Определяем максимальное количество байт для чтения за один раз
+                        int maxToRead = Math.min(1024, contentLength - totalBytesRead);
+
+                        bytesRead = bodyStream.read(bodyBytes, totalBytesRead, maxToRead);
+
+                        if (bytesRead == -1) {
+                            System.out.println("End of stream reached after " + totalBytesRead + " bytes");
+                            break; // Конец потока
+                        }
+
+                        totalBytesRead += bytesRead;
+                        System.out.println("POST handler: read " + bytesRead + " bytes, total: " + totalBytesRead);
+                    }
+                } catch (IOException e) {
+                    System.err.println("Error reading request body: " + e.getMessage());
+                    Server.sendResponse(out, 500, "Error reading request body: " + e.getMessage());
+                    return;
+                }
+
+                // Проверяем, прочитали ли мы все данные
+                if (totalBytesRead < contentLength) {
+                    System.out.println("WARNING: Read only " + totalBytesRead + " bytes out of " + contentLength);
+                    // Продолжаем с тем, что удалось прочитать
+                }
+
+                // Преобразуем содержимое в строку
+                String bodyContent = new String(bodyBytes, 0, totalBytesRead, StandardCharsets.UTF_8);
+                System.out.println("POST body content: " + bodyContent);
+
+                // Формируем и отправляем ответ
+                String response = "Received (" + contentType + "): " + bodyContent;
+                System.out.println("Sending response: " + response);
                 Server.sendResponse(out, 200, response);
 
             } catch (Exception e) {
-                System.err.println("Error processing POST request: " + e.getMessage());
-                Server.sendResponse(out, 500, "Error processing request");
+                System.err.println("POST error: " + e.getMessage());
+                e.printStackTrace();  // Выводим стек вызовов для отладки
+                Server.sendResponse(out, 500, "Error processing request: " + e.getMessage());
             }
         });
 
+        // Добавляем новый обработчик для тестирования чтения JSON
+        server.addHandler("POST", "/json", (req, out) -> {
+            try {
+                // Проверяем Content-Type
+                String contentType = req.getHeaders().getOrDefault("content-type", "");
+                if (!contentType.contains("application/json")) {
+                    Server.sendResponse(out, 415, "Expected Content-Type: application/json");
+                    return;
+                }
+
+                // Читаем тело
+                if (req.getBody() == null) {
+                    Server.sendResponse(out, 400, "Request body is missing");
+                    return;
+                }
+
+                // Читаем JSON из тела запроса
+                ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+                byte[] data = new byte[4096];
+                int bytesRead;
+                try (InputStream bodyStream = req.getBody()) {
+                    while ((bytesRead = bodyStream.read(data)) != -1) {
+                        buffer.write(data, 0, bytesRead);
+                    }
+                }
+
+                String jsonBody = buffer.toString(StandardCharsets.UTF_8.name());
+                System.out.println("Received JSON: " + jsonBody);
+
+                // Отправляем эхо-ответ
+                String response = "{\n  \"success\": true,\n  \"message\": \"JSON received\",\n  \"data\": " +
+                        jsonBody + "\n}";
+                Server.sendResponse(out, 200, "application/json", response);
+
+            } catch (Exception e) {
+                System.err.println("JSON handler error: " + e.getMessage());
+                e.printStackTrace();
+                Server.sendResponse(out, 500, "application/json",
+                        "{\n  \"success\": false,\n  \"error\": \"" + e.getMessage() + "\"\n}");
+            }
+        });
+
+        // Запускаем сервер
         server.listen(9999);
     }
 }
