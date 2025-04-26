@@ -3,5 +3,5 @@ import java.io.IOException;
 
 @FunctionalInterface
 interface Handler {
-    void handle(Request request, BufferedOutputStream responseStream) throws IOException;
+    void handle(Request request, BufferedOutputStream out) throws IOException;
 }

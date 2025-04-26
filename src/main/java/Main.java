@@ -1,26 +1,20 @@
 import org.apache.http.NameValuePair;
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
+import java.io.*;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
 public class Main {
-    public static void main(String[] args) {
+    public static void main(String[] args) throws IOException {
         final var server = new Server();
 
         // Простой обработчик для тестирования
-        server.addHandler("GET", "/", (request, out) -> {
+        server.addHandler("GET", "/", (_, out) -> {
             Server.sendResponse(out, 200, "Server is working!");
         });
 
-        // Обработчик для /messages
-        server.addHandler("GET", "/messages", (request, out) -> {
-            String response = "Messages endpoint response";
-            Server.sendResponse(out, 200, response);
-        });
-
-        // GET /messages
+        // GET /messages с параметрами
         server.addHandler("GET", "/messages", (request, out) -> {
             String limit = request.getQueryParam("limit");
             String offset = request.getQueryParam("offset");
@@ -48,6 +42,13 @@ public class Main {
             Server.sendResponse(out, 200, responseBody);
         });
 
+        // GET /data
+        server.addHandler("GET", "/data", (req, out) -> {
+            String response = "GET /data response\n" +
+                    "Query params: " + req.getQueryParams();
+            Server.sendResponse(out, 200, response);
+        });
+
         // GET /duplicate (обработка дублирующихся параметров)
         server.addHandler("GET", "/duplicate", (request, out) -> {
             List<NameValuePair> paramsList = request.getQueryParamsList();
@@ -58,16 +59,32 @@ public class Main {
             Server.sendResponse(out, 200, responseBody);
         });
 
-        // POST /messages
-        server.addHandler("POST", "/messages", (request, out) -> {
-            try (BufferedReader reader = new BufferedReader(new InputStreamReader(request.getBody()))) {
-                String bodyContent = reader.lines().collect(Collectors.joining("\n"));
-                String responseBody = "POST messages. Body: " + bodyContent;
+        // Универсальный POST обработчик для /data
+        server.addHandler("POST", "/data", (req, out) -> {
+            try {
+                // Читаем Content-Type
+                String contentType = req.getHeaders().getOrDefault("Content-Type", "text/plain");
 
-                Server.sendResponse(out, 200, responseBody);
+                // Читаем тело запроса
+                String bodyContent;
+                try (BufferedReader reader = new BufferedReader(
+                        new InputStreamReader(req.getBody(), StandardCharsets.UTF_8))) {
+                    bodyContent = reader.lines().collect(Collectors.joining("\n"));
+                }
+
+                // Формируем ответ в зависимости от Content-Type
+                String response;
+                if (contentType.contains("application/json")) {
+                    response = "JSON received: " + bodyContent;
+                } else {
+                    response = "Text received: " + bodyContent;
+                }
+
+                Server.sendResponse(out, 200, response);
+
             } catch (Exception e) {
-                System.err.println("Error reading POST body: " + e.getMessage());
-                Server.sendResponse(out, 500, "Error reading body");
+                System.err.println("Error processing POST request: " + e.getMessage());
+                Server.sendResponse(out, 500, "Error processing request");
             }
         });
 

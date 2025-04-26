@@ -45,8 +45,8 @@ class Request {
         return path;
     }
 
-    public String getHeader(String name) {
-        return headers.get(name);
+    public Map<String, String> getHeaders() {
+        return headers;
     }
 
     public InputStream getBody() {
