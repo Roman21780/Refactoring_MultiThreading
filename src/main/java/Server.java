@@ -1,111 +1,150 @@
 import java.io.*;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.util.Arrays;
+import java.net.SocketException;
+import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.*;
 
 public class Server {
-    private final Map<String, Map<String, Handler>> handlers = new HashMap<>();
+    private final Map<String, Map<String, Handler>> handlers = new ConcurrentHashMap<>();
     private final ExecutorService threadPool = Executors.newFixedThreadPool(64);
 
     public void addHandler(String method, String path, Handler handler) {
-        handlers.computeIfAbsent(method, _ -> new HashMap<>()).put(path, handler);
+        handlers.computeIfAbsent(method, k -> new ConcurrentHashMap<>()).put(path, handler);
     }
 
     public void listen(int port) {
-        try (final var serverSocket = new ServerSocket(port)) {
-            while (true) {
-                final var socket = serverSocket.accept();
-                threadPool.submit(() -> handleConnection(socket));
+        try (ServerSocket serverSocket = new ServerSocket(port)) {
+            System.out.println("Server started on port " + port);
+
+            while (!Thread.currentThread().isInterrupted()) {
+                try {
+                    Socket socket = serverSocket.accept();
+                    socket.setSoTimeout(5000); // 5 секунд таймаут
+                    threadPool.execute(() -> handleConnection(socket));
+                } catch (IOException e) {
+                    System.err.println("Accept error: " + e.getMessage());
+                }
             }
         } catch (IOException e) {
-            e.printStackTrace();
+            System.err.println("Server error: " + e.getMessage());
         } finally {
             threadPool.shutdown();
         }
     }
 
     private void handleConnection(Socket socket) {
-        try (
-                socket;
-                final var in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-                final var out = new BufferedOutputStream(socket.getOutputStream());
-        ) {
-            final var request = parseRequest(in);
-            if (request == null) return;
+        try (socket;
+             InputStream input = socket.getInputStream();
+             BufferedOutputStream output = new BufferedOutputStream(socket.getOutputStream())) {
 
-            var methodHandlers = handlers.get(request.getMethod());
-            if (methodHandlers == null) {
-                sendNotFound(out);
+            Request request = parseRequest(input);
+            if (request == null) {
+                sendResponse(output, 400, "Bad Request");
                 return;
             }
 
-            var handler = methodHandlers.get(request.getPath());
+            // Обработка favicon.ico
+            if ("/favicon.ico".equals(request.getPath())) {
+                sendResponse(output, 404, "Not Found");
+                return;
+            }
+
+            Handler handler = findHandler(request.getMethod(), request.getPath());
             if (handler == null) {
-                sendNotFound(out);
+                sendResponse(output, 404, "No handler for " + request.getPath());
                 return;
             }
 
-            handler.handle(request, out);
+            handler.handle(request, output);
+
+        } catch (SocketException e) {
+            System.out.println("Client disconnected: " + e.getMessage());
         } catch (IOException e) {
-            e.printStackTrace();
+            System.err.println("Connection error: " + e.getMessage());
         }
     }
 
-    private Request parseRequest(BufferedReader in) throws IOException {
-        final var requestLine = in.readLine();
-        if (requestLine == null) return null;
-
-        final var parts = requestLine.split(" ");
-        if (parts.length != 3) return null;
-
-        final var method = parts[0];
-        var pathAndQuery = parts[1].split("\\?");
-        final var path = pathAndQuery[0];
-
-        // Парсим query параметры
-        Map<String, String> queryParams = new HashMap<>();
-        if (pathAndQuery.length > 1) {
-            Arrays.stream(pathAndQuery[1].split("&"))
-                    .map(param -> param.split("="))
-                    .filter(pair -> pair.length == 2)
-                    .forEach(pair -> queryParams.put(pair[0], pair[1]));
+    private Request parseRequest(InputStream inputStream) throws IOException {
+        BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream));
+        String requestLine = reader.readLine();
+        if (requestLine == null || requestLine.isEmpty()) {
+            return null;
         }
+
+        String[] parts = requestLine.split(" ");
+        if (parts.length != 3) {
+            return null;
+        }
+
+        String method = parts[0];
+        String path = parts[1];
+        String protocol = parts[2];
 
         // Читаем заголовки
-        var headers = new HashMap<String, String>();
+        Map<String, String> headers = new HashMap<>();
         String line;
-        while (!(line = in.readLine()).isEmpty()) {
-            var headerParts = line.split(": ");
-            if (headerParts.length == 2) {
-                headers.put(headerParts[0], headerParts[1]);
+        while ((line = reader.readLine()) != null && !line.isEmpty()) {
+            int separator = line.indexOf(':');
+            if (separator > 0) {
+                String headerName = line.substring(0, separator).trim();
+                String headerValue = line.substring(separator + 1).trim();
+                headers.put(headerName, headerValue);
             }
         }
 
-        // Читаем тело если есть
+        // Читаем тело запроса, если есть
         InputStream body = null;
         if (headers.containsKey("Content-Length")) {
-            var contentLength = Integer.parseInt(headers.get("Content-Length"));
+            int contentLength = Integer.parseInt(headers.get("Content-Length"));
             if (contentLength > 0) {
-                char[] bodyChars = new char[contentLength];
-                in.read(bodyChars, 0, contentLength);
-                body = new ByteArrayInputStream(new String(bodyChars).getBytes());
+                byte[] bodyBytes = new byte[contentLength];
+                int bytesRead = 0;
+                while (bytesRead < contentLength) {
+                    int result = inputStream.read(bodyBytes, bytesRead, contentLength - bytesRead);
+                    if (result == -1) break;
+                    bytesRead += result;
+                }
+                body = new ByteArrayInputStream(bodyBytes);
             }
         }
 
-        return new Request(method, path, headers, body, queryParams);
+        return new Request(method, path, headers, body);
     }
 
-    private void sendNotFound(BufferedOutputStream out) throws IOException {
-        out.write((
-                "HTTP/1.1 404 Not Found\r\n" +
-                        "Content-Length: 0\r\n" +
+    private Handler findHandler(String method, String path) {
+        Map<String, Handler> methodHandlers = handlers.get(method);
+        if (methodHandlers == null) return null;
+        return methodHandlers.get(path.split("\\?")[0]);
+    }
+
+    public static void sendResponse(OutputStream out, int statusCode, String body) throws IOException {
+        String statusText = getStatusText(statusCode);
+        String response = String.format(
+                "HTTP/1.1 %d %s\r\n" +
+                        "Content-Type: text/plain\r\n" +
+                        "Content-Length: %d\r\n" +
                         "Connection: close\r\n" +
-                        "\r\n"
-        ).getBytes());
+                        "\r\n" +
+                        "%s",
+                statusCode, statusText, body.length(), body
+        );
+
+        out.write(response.getBytes(StandardCharsets.UTF_8));
         out.flush();
     }
+
+    private static String getStatusText(int statusCode) {
+        return switch (statusCode) {
+            case 200 -> "OK";
+            case 400 -> "Bad Request";
+            case 404 -> "Not Found";
+            case 500 -> "Internal Server Error";
+            default -> "Unknown";
+        };
+    }
+
+    // Остальные методы остаются без изменений
 }
