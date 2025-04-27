@@ -17,17 +17,15 @@ public class Request {
     private final byte[] bodyBytes;
 
     // Для query параметров
-    private Map<String, List<String>> queryParams;
-    private List<NameValuePair> queryParamsList;
+    private final Map<String, List<String>> queryParams;
+    private final List<NameValuePair> queryParamsList;
 
     // Для POST параметров
-    private Map<String, List<String>> postParams;
-    private List<NameValuePair> postParamsList;
-    private boolean postParamsParsed = false;
+    private final Map<String, List<String>> postParams;
+    private final List<NameValuePair> postParamsList;
 
     // Для multipart данных
-    private List<Part> parts;
-    private boolean multipartParsed = false;
+    private final List<Part> parts;
 
     public Request(String method, String path, Map<String, String> headers, InputStream body) throws IOException {
         this.method = method;
@@ -37,216 +35,220 @@ public class Request {
         this.bodyBytes = body != null ? body.readAllBytes() : new byte[0];
 
         // парсим query параметры в конструкторе
-        parseQueryParams();
-    }
+        this.queryParamsList = parseQueryParams();
+        this.queryParams = convertToMap(queryParamsList);
 
-    // ========== Multipart обработка ==========
+        // парсим POST параметры
+        Pair<Map<String, List<String>>, List<NameValuePair>> parsedPost = parsePostParams();
+        this.postParams = parsedPost.getLeft();
+        this.postParamsList = parsedPost.getRight();
 
-    public boolean isMultipart() {
-        String contentType = headers.get("content-type");
-        return contentType != null && contentType.startsWith("multipart/form-data");
-    }
-
-    private void parseMultipart() {
-        if (multipartParsed) return;
-        multipartParsed = true;
-
-        if (!isMultipart()) {
-            parts = Collections.emptyList();
-            return;
-        }
-
-        try {
+        // Парсим multipart данные
+        if (isMultipart()) {
             String contentType = headers.get("content-type");
             String boundary = extractBoundary(contentType);
-            if (boundary == null) {
+            if (boundary != null) {
+                this.parts = parseMultipartData(boundary);
+            } else {
                 System.err.println("Could not extract boundary from Content-Type");
-                parts = Collections.emptyList();
-                return;
+                this.parts = Collections.emptyList();
             }
+        } else {
+            this.parts = Collections.emptyList();
+        }
 
-            System.out.println("Найдена граница (boundary): " + boundary);
-            boundary = "--" + boundary;
+    }
 
-            // Используем исправленный алгоритм для разбора multipart
-            parts = parseMultipartData(boundary);
+    // ========== Query параметры ==========
+    private List<NameValuePair> parseQueryParams() {
+        if (!rawPath.contains("?")) {
+            return Collections.emptyList();
+        }
+        try {
+            String query = rawPath.substring(rawPath.indexOf('?') + 1);
+            return URLEncodedUtils.parse(query, StandardCharsets.UTF_8);
         } catch (Exception e) {
-            System.err.println("Multipart parse error: " + e.getMessage());
-            e.printStackTrace(); // Добавим стек вызовов для лучшей диагностики
-            parts = Collections.emptyList();
+            System.err.println("Error parsing query parameters: " + e.getMessage());
+            return Collections.emptyList();
         }
     }
 
+    private Map<String, List<String>> convertToMap(List<NameValuePair> params) {
+        Map<String, List<String>> map = new HashMap<>();
+        for (NameValuePair pair : params) {
+            map.computeIfAbsent(pair.getName(), k -> new ArrayList<>()).add(pair.getValue());
+        }
+        map.replaceAll((k, v) -> Collections.unmodifiableList(v));
+        return Collections.unmodifiableMap(map);
+    }
+
+    public Map<String, List<String>> getQueryParams() {
+        return queryParams;
+    }
+
+    public List<NameValuePair> getQueryParamsList() {
+        return queryParamsList;
+    }
+
+    public String getQueryParam(String name) {
+        List<String> values = queryParams.get(name);
+        return values != null && !values.isEmpty() ? values.get(0) : null;
+    }
+
+    public List<String> getQueryParamValues(String name) {
+        return queryParams.getOrDefault(name, Collections.emptyList());
+    }
+
+    public boolean hasQueryParam(String name) {
+        return queryParams.containsKey(name);
+    }
+
+    // ========== POST параметры ==========
+    private Pair<Map<String, List<String>>, List<NameValuePair>> parsePostParams() {
+        if (!("POST".equals(method) || "PUT".equals(method) || "PATCH".equals(method)) || !isFormUrlEncoded()) {
+            return new Pair<>(Collections.emptyMap(), Collections.emptyList());
+        }
+        try {
+            String bodyStr = new String(bodyBytes, StandardCharsets.UTF_8);
+            List<NameValuePair> parsed = URLEncodedUtils.parse(bodyStr, StandardCharsets.UTF_8);
+            Map<String, List<String>> map = convertToMap(parsed);
+            return new Pair<>(map, parsed);
+        } catch (Exception e) {
+            System.err.println("Error parsing POST parameters: " + e.getMessage());
+            return new Pair<>(Collections.emptyMap(), Collections.emptyList());
+        }
+    }
+
+    public Map<String, List<String>> getPostParams() {
+        return postParams;
+    }
+
+    public List<NameValuePair> getPostParamsList() {
+        return postParamsList;
+    }
+
+    public String getPostParam(String name) {
+        List<String> values = postParams.get(name);
+        return values != null && !values.isEmpty() ? values.get(0) : null;
+    }
+
+    public List<String> getPostParamValues(String name) {
+        return postParams.getOrDefault(name, Collections.emptyList());
+    }
+
+    public boolean hasPostParam(String name) {
+        return postParams.containsKey(name);
+    }
+
+    // ========== Multipart данные ==========
     private List<Part> parseMultipartData(String boundary) {
         List<Part> resultParts = new ArrayList<>();
-
         try {
-            // Ищем все границы в байтовом массиве (более надежный способ)
-            List<Integer> boundaryPositions = findBoundaryPositions(bodyBytes, boundary.getBytes(StandardCharsets.UTF_8));
+            byte[] fullBoundary = ("--" + boundary).getBytes(StandardCharsets.UTF_8);
+            byte[] endBoundary = ("--" + boundary + "--").getBytes(StandardCharsets.UTF_8);
 
-            if (boundaryPositions.size() < 2) {
-                System.out.println("Не найдены позиции границ или их недостаточно");
+            List<Integer> boundaryPositions = findBoundaryPositions(bodyBytes, fullBoundary);
+            int endPosition = findSequence(bodyBytes, endBoundary, 0, bodyBytes.length);
+
+            if (boundaryPositions.isEmpty()) {
+                System.out.println("Границы не найдены");
                 return resultParts;
             }
 
-            System.out.println("Найдено " + (boundaryPositions.size() - 1) + " частей по разделителю");
+            System.out.println("Найдено границ: " + boundaryPositions.size());
 
-            // Обрабатываем все части между границами
-            for (int i = 0; i < boundaryPositions.size() - 1; i++) {
-                int start = boundaryPositions.get(i);
-                int end = boundaryPositions.get(i + 1);
+            for (int i = 0; i < boundaryPositions.size(); i++) {
+                int start = boundaryPositions.get(i) + fullBoundary.length;
+                int end = (i < boundaryPositions.size() - 1) ? boundaryPositions.get(i + 1) : endPosition;
 
-                // Пропускаем первую часть (преамбула)
-                if (i == 0) continue;
+                if (end == -1) continue;
 
-                // Проверяем, не является ли это последней границей
-                if (end - start > 4) {
-                    byte[] checkBytes = new byte[4];
-                    System.arraycopy(bodyBytes, start, checkBytes, 0, 4);
-                    String check = new String(checkBytes, StandardCharsets.UTF_8);
-                    if (check.startsWith("--\r\n")) {
-                        continue;  // Пропускаем финальную границу
-                    }
-                }
+                // Пропускаем пустые части
+                if (end - start <= 2) continue;
 
-                // Ищем разделитель между заголовками и телом
                 byte[] headerEnd = "\r\n\r\n".getBytes(StandardCharsets.UTF_8);
                 int headerEndPos = findSequence(bodyBytes, headerEnd, start, end);
 
                 if (headerEndPos == -1) {
-                    System.out.println("Не найден разделитель заголовков для части " + i);
+                    System.out.println("Не найден конец заголовков для части " + i);
                     continue;
                 }
 
-                // Извлекаем и парсим заголовки
+                // Чтение заголовков
                 byte[] headersBytes = Arrays.copyOfRange(bodyBytes, start, headerEndPos);
                 String headersText = new String(headersBytes, StandardCharsets.UTF_8);
+                Map<String, String> headers = parseHeaders(headersText);
 
-                // Пропускаем начальные символы новой строки, если они есть
-                if (headersText.startsWith("\r\n")) {
-                    headersText = headersText.substring(2);
-                }
-
-                Map<String, String> partHeaders = new HashMap<>();
-                String[] headerLines = headersText.split("\r\n");
-
-                for (String header : headerLines) {
-                    int colonIndex = header.indexOf(':');
-                    if (colonIndex > 0) {
-                        String name = header.substring(0, colonIndex).trim().toLowerCase();
-                        String value = header.substring(colonIndex + 1).trim();
-                        partHeaders.put(name, value);
-                        System.out.println("Заголовок части: " + name + " = " + value);
-                    }
-                }
-
-                // Извлекаем информацию из заголовков
-                String contentDisposition = partHeaders.get("content-disposition");
+                String contentDisposition = headers.get("content-disposition");
                 if (contentDisposition == null) {
-                    System.out.println("Content-Disposition отсутствует для части " + i);
+                    System.out.println("Отсутствует Content-Disposition в части " + i);
                     continue;
                 }
+
+                String fieldName = extractFieldName(contentDisposition);
+                String fileName = extractFileName(contentDisposition);
+                boolean isFile = fileName != null && !fileName.isEmpty();
+                String contentType = headers.get("content-type");
+
+                // Чтение содержимого
+                int contentStart = headerEndPos + headerEnd.length;
+                int contentEnd = end - 2; // Убираем \r\n в конце
+                byte[] content = Arrays.copyOfRange(bodyBytes, contentStart, contentEnd);
+
+                if (!isFile) {
+                    String textContent = new String(content, StandardCharsets.UTF_8).trim();
+                    content = textContent.getBytes(StandardCharsets.UTF_8);
+                }
+
+                System.out.println("Обработана часть: " + fieldName +
+                        (isFile ? " (файл: " + fileName + ")" : " (текст)"));
+
+                resultParts.add(new Part(fieldName, fileName, contentType, content, isFile));
+            }
+        } catch (Exception e) {
+            System.err.println("Ошибка разбора multipart: " + e.getMessage());
+            e.printStackTrace();
+        }
+        return resultParts;
+    }
+
+    private List<Part> parseMultipartParts(String boundary) {
+        List<Part> resultParts = new ArrayList<>();
+        try {
+            List<Integer> boundaryPositions = findBoundaryPositions(bodyBytes, boundary.getBytes(StandardCharsets.UTF_8));
+            if (boundaryPositions.size() < 2) {
+                return resultParts;
+            }
+            for (int i = 0; i < boundaryPositions.size() - 1; i++) {
+                int start = boundaryPositions.get(i);
+                int end = boundaryPositions.get(i + 1);
+                if (i == 0) continue; // Пропускаем первую границу
+
+                byte[] headerEnd = "\r\n\r\n".getBytes(StandardCharsets.UTF_8);
+                int headerEndPos = findSequence(bodyBytes, headerEnd, start, end);
+                if (headerEndPos == -1) continue;
+
+                byte[] headersBytes = Arrays.copyOfRange(bodyBytes, start, headerEndPos);
+                String headersText = new String(headersBytes, StandardCharsets.UTF_8);
+                Map<String, String> partHeaders = parseHeaders(headersText);
+
+                String contentDisposition = partHeaders.get("content-disposition");
+                if (contentDisposition == null) continue;
 
                 String fieldName = extractFieldName(contentDisposition);
                 String fileName = extractFileName(contentDisposition);
                 boolean isFile = (fileName != null && !fileName.isEmpty());
                 String contentType = partHeaders.get("content-type");
 
-                System.out.println("Разбор части: fieldName=" + fieldName + ", fileName=" + fileName + ", isFile=" + isFile);
-
-                // Извлекаем тело части (контент) напрямую из байтов
-                // +4 для пропуска \r\n\r\n
                 int contentStart = headerEndPos + 4;
-                int contentEnd = end - 2; // -2 для пропуска \r\n в конце
-
-                if (contentEnd > contentStart) {
-                    byte[] content = Arrays.copyOfRange(bodyBytes, contentStart, contentEnd);
-
-                    resultParts.add(new Part(fieldName, fileName, contentType, content, isFile));
-                } else {
-                    System.out.println("Пустой контент для части " + i);
-                    resultParts.add(new Part(fieldName, fileName, contentType, new byte[0], isFile));
-                }
+                int contentEnd = end - 2;
+                byte[] content = Arrays.copyOfRange(bodyBytes, contentStart, contentEnd);
+                resultParts.add(new Part(fieldName, fileName, contentType, content, isFile));
             }
-
         } catch (Exception e) {
-            System.err.println("Ошибка при разборе multipart данных: " + e.getMessage());
-            e.printStackTrace();
+            System.err.println("Error parsing multipart parts: " + e.getMessage());
         }
-
         return resultParts;
-    }
-
-    // Вспомогательный метод для поиска всех позиций границ
-    private List<Integer> findBoundaryPositions(byte[] data, byte[] boundary) {
-        List<Integer> positions = new ArrayList<>();
-
-        // Ищем все вхождения boundary в data
-        for (int i = 0; i <= data.length - boundary.length; i++) {
-            boolean found = true;
-            for (int j = 0; j < boundary.length; j++) {
-                if (data[i + j] != boundary[j]) {
-                    found = false;
-                    break;
-                }
-            }
-
-            if (found) {
-                positions.add(i);
-                // Перескакиваем текущее совпадение
-                i += boundary.length - 1;
-            }
-        }
-
-        return positions;
-    }
-
-    // Вспомогательный метод для поиска последовательности байтов
-    private int findSequence(byte[] data, byte[] seq, int startPos, int endPos) {
-        for (int i = startPos; i <= endPos - seq.length; i++) {
-            boolean found = true;
-            for (int j = 0; j < seq.length; j++) {
-                if (data[i + j] != seq[j]) {
-                    found = false;
-                    break;
-                }
-            }
-
-            if (found) {
-                return i;
-            }
-        }
-
-        return -1;
-    }
-
-    private String extractBoundary(String contentType) {
-        int boundaryIndex = contentType.indexOf("boundary=");
-        if (boundaryIndex == -1) return null;
-
-        String boundary = contentType.substring(boundaryIndex + "boundary=".length());
-        if (boundary.startsWith("\"") && boundary.endsWith("\"")) {
-            boundary = boundary.substring(1, boundary.length() - 1);
-        } else {
-            // Если нет кавычек, отрезаем до следующего разделителя (если есть)
-            int endIndex = boundary.indexOf(';');
-            if (endIndex > 0) {
-                boundary = boundary.substring(0, endIndex);
-            }
-        }
-
-        // Удаляем пробелы, если они есть
-        return boundary.trim();
-    }
-
-    private byte[] getBoundaryBytes(String contentType) {
-        String boundary = extractBoundary(contentType);
-        if (boundary == null) {
-            return null;
-        }
-
-        // Добавляем префикс к границе
-        return ("--" + boundary).getBytes(StandardCharsets.UTF_8);
     }
 
     private String extractFieldName(String contentDisposition) {
@@ -265,8 +267,93 @@ public class Request {
                 name = name.substring(0, endPos);
             }
         }
+        return name.trim().isEmpty() ? null : name.trim();
+    }
 
-        return name;
+    private Map<String, String> parseHeaders(String headersText) {
+        Map<String, String> headers = new HashMap<>();
+        String[] lines = headersText.split("\r\n");
+        for (String line : lines) {
+            int colonIndex = line.indexOf(':');
+            if (colonIndex > 0) {
+                String name = line.substring(0, colonIndex).trim().toLowerCase();
+                String value = line.substring(colonIndex + 1).trim();
+                headers.put(name, value);
+            }
+        }
+        return headers;
+    }
+
+    public Part getPart(String name) {
+        return parts.stream()
+                .filter(part -> part.getName().equals(name))
+                .findFirst()
+                .orElse(null);
+    }
+
+    public List<Part> getParts() {
+        return parts;
+    }
+
+    public List<Part> getParts(String name) {
+        return parts.stream()
+                .filter(part -> part.getName().equals(name))
+                .collect(Collectors.toList());
+    }
+
+    // ========== Вспомогательные методы ==========
+    boolean isMultipart() {
+        String contentType = headers.get("content-type");
+        return contentType != null && contentType.startsWith("multipart/form-data");
+    }
+
+    boolean isFormUrlEncoded() {
+        String contentType = headers.get("content-type");
+        return contentType != null && contentType.contains("x-www-form-urlencoded");
+    }
+
+    private String extractBoundary(String contentType) {
+        int boundaryIndex = contentType.indexOf("boundary=");
+        if (boundaryIndex == -1) return null;
+        String boundary = contentType.substring(boundaryIndex + "boundary=".length());
+        if (boundary.startsWith("\"") && boundary.endsWith("\"")) {
+            boundary = boundary.substring(1, boundary.length() - 1);
+        }
+        return boundary.trim();
+    }
+
+    private List<Integer> findBoundaryPositions(byte[] data, byte[] boundary) {
+        List<Integer> positions = new ArrayList<>();
+        for (int i = 0; i <= data.length - boundary.length; i++) {
+            boolean found = true;
+            for (int j = 0; j < boundary.length; j++) {
+                if (data[i + j] != boundary[j]) {
+                    found = false;
+                    break;
+                }
+            }
+            if (found) {
+                positions.add(i);
+                i += boundary.length - 1;
+            }
+        }
+        return positions;
+    }
+
+    private int findSequence(byte[] data, byte[] seq, int startPos, int endPos) {
+        for (int i = startPos; i <= endPos - seq.length; i++) {
+            boolean found = true;
+            for (int j = 0; j < seq.length; j++) {
+                if (data[i + j] != seq[j]) {
+                    found = false;
+                    break;
+                }
+            }
+            if (found) {
+                return i;
+            }
+        }
+        return -1;
     }
 
     private String extractFileName(String contentDisposition) {
@@ -285,150 +372,16 @@ public class Request {
                 fileName = fileName.substring(0, endPos);
             }
         }
-
-        return fileName.isEmpty() ? null : fileName;
+        return fileName.trim().isEmpty() ? null : fileName.trim();
     }
 
-    public Part getPart(String name) {
-        parseMultipart();
-        return parts.stream()
-                .filter(part -> part.getName().equals(name))
-                .findFirst()
-                .orElse(null);
-    }
-
-    public List<Part> getParts() {
-        parseMultipart();
-        return parts;
-    }
-
-    public List<Part> getParts(String name) {
-        parseMultipart();
-        return parts.stream()
-                .filter(part -> part.getName().equals(name))
-                .collect(Collectors.toList());
-    }
-
-    // ========== Остальные методы ==========
-
-    public InputStream getBody() {
-        return new ByteArrayInputStream(bodyBytes);
-    }
-
-    public String getBodyAsString() {
-        return new String(bodyBytes, StandardCharsets.UTF_8);
-    }
-
-    // Методы для работы с POST параметрами (x-www-form-urlencoded)
-    public boolean isFormUrlEncoded() {
-        String contentType = headers.get("content-type");
-        return contentType != null && contentType.contains("x-www-form-urlencoded");
-    }
-
-    private void parsePostParamsIfNeeded() {
-        if (postParamsParsed) return;
-        postParamsParsed = true;
-
-        if (!("POST".equals(method) || "PUT".equals(method) || "PATCH".equals(method)) || !isFormUrlEncoded()) {
-            postParamsList = Collections.emptyList();
-            postParams = Collections.emptyMap();
-            return;
-        }
-
-        try {
-            String bodyStr = getBodyAsString();
-            postParamsList = URLEncodedUtils.parse(bodyStr, StandardCharsets.UTF_8);
-
-            postParams = new HashMap<>();
-            for (NameValuePair pair : postParamsList) {
-                postParams.computeIfAbsent(pair.getName(), k -> new ArrayList<>())
-                        .add(pair.getValue());
-            }
-
-            postParams.replaceAll((k, v) -> Collections.unmodifiableList(v));
-            postParams = Collections.unmodifiableMap(postParams);
-            postParamsList = Collections.unmodifiableList(postParamsList);
-        } catch (Exception e) {
-            System.err.println("Error parsing POST parameters: " + e.getMessage());
-            postParamsList = Collections.emptyList();
-            postParams = Collections.emptyMap();
-        }
-    }
-
-    public Map<String, List<String>> getPostParams() {
-        parsePostParamsIfNeeded();
-        return postParams;
-    }
-
-    public List<NameValuePair> getPostParamsList() {
-        parsePostParamsIfNeeded();
-        return postParamsList;
-    }
-
-    public String getPostParam(String name) {
-        List<String> values = getPostParams().get(name);
-        return values != null && !values.isEmpty() ? values.get(0) : null;
-    }
-
-    public List<String> getPostParamValues(String name) {
-        return getPostParams().getOrDefault(name, Collections.emptyList());
-    }
-
-    public boolean hasPostParam(String name) {
-        return getPostParams().containsKey(name);
-    }
-
-    private void parseQueryParams() {
-        queryParams = new HashMap<>();
-        queryParamsList = new ArrayList<>();
-
-        if (rawPath.contains("?")) {
-            String query = rawPath.substring(rawPath.indexOf('?') + 1);
-            try {
-                List<NameValuePair> parsed = URLEncodedUtils.parse(query, StandardCharsets.UTF_8);
-                for (NameValuePair pair : parsed) {
-                    queryParams.computeIfAbsent(pair.getName(), k -> new ArrayList<>())
-                            .add(pair.getValue());
-                    queryParamsList.add(pair);
-                }
-            } catch (Exception e) {
-                System.err.println("Error parsing query parameters: " + e.getMessage());
-            }
-        }
-
-        queryParams.replaceAll((k, v) -> Collections.unmodifiableList(v));
-        queryParams = Collections.unmodifiableMap(queryParams);
-        queryParamsList = Collections.unmodifiableList(queryParamsList);
-    }
-
-
-    // Методы для работы с query параметрами
-    public Map<String, List<String>> getQueryParams() {
-        return queryParams;
-    }
-
-    public List<NameValuePair> getQueryParamsList() {
-        return queryParamsList;
-    }
-
-    public String getQueryParam(String name) {
-        List<String> values = getQueryParams().get(name);
-        return values != null && !values.isEmpty() ? values.get(0) : null;
-    }
-
-    public List<String> getQueryParamValues(String name) {
-        return getQueryParams().getOrDefault(name, Collections.emptyList());
-    }
-
-    public boolean hasQueryParam(String name) {
-        return getQueryParams().containsKey(name);
-    }
-
-    // Базовые геттеры
+    // ========== Базовые геттеры ==========
     public String getMethod() { return method; }
     public String getPath() { return path; }
     public String getRawPath() { return rawPath; }
     public Map<String, String> getHeaders() { return headers; }
+    public InputStream getBody() { return new ByteArrayInputStream(bodyBytes); }
+    public String getBodyAsString() { return new String(bodyBytes, StandardCharsets.UTF_8); }
 
     @Override
     public String toString() {
@@ -462,17 +415,22 @@ public class Request {
         public boolean isFile() { return isFile; }
         public long getSize() { return content.length; }
         public Map<String, String> getHeaders() { return headers; }
+        public InputStream getInputStream() { return new ByteArrayInputStream(content); }
+        public String getString() { return new String(content, StandardCharsets.UTF_8); }
+        public byte[] getBytes() { return content.clone(); }
+    }
 
-        public InputStream getInputStream() {
-            return new ByteArrayInputStream(content);
+    // Вспомогательный класс для хранения пар значений
+    private static class Pair<L, R> {
+        private final L left;
+        private final R right;
+
+        public Pair(L left, R right) {
+            this.left = left;
+            this.right = right;
         }
 
-        public String getString() {
-            return new String(content, StandardCharsets.UTF_8);
-        }
-
-        public byte[] getBytes() {
-            return content.clone();
-        }
+        public L getLeft() { return left; }
+        public R getRight() { return right; }
     }
 }

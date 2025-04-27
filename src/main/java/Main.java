@@ -267,14 +267,11 @@ public class Main {
                     System.out.println("Размер части: " + part.getSize() + " байт");
                     System.out.println("Это файл: " + part.isFile());
 
-                    // Проверяем имя файла
-                    String fileName = part.getFileName();
-                    System.out.println("Имя файла: " + (fileName != null ? fileName : "null"));
-
-                    if (fileName != null) {
+                    if (part.isFile()) {
+                        String fileName = part.getFileName();
+                        System.out.println("Имя файла: " + fileName);
                         System.out.println("Тип контента: " + part.getContentType());
 
-                        // Сохранение файла
                         if (part.getSize() > 0) {
                             String savedName = System.currentTimeMillis() + "_" + fileName;
                             File file = new File(uploadDir, savedName);
@@ -308,9 +305,10 @@ public class Main {
                             item.put("error", "Zero size file");
                         }
                     } else {
-                        System.out.println("Значение поля: " + part.getString());
+                        String textValue = part.getString().trim();
+                        System.out.println("Значение поля: " + textValue);
                         item.put("type", "field");
-                        item.put("value", part.getString());
+                        item.put("value", textValue.isEmpty() ? null : textValue);
                     }
                     items.add(item);
                 }
