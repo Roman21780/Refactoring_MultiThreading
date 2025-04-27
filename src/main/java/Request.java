@@ -55,207 +55,235 @@ public class Request {
 
         try {
             String contentType = headers.get("content-type");
-            String boundary = "--" + extractBoundary(contentType);
+            String boundary = extractBoundary(contentType);
+            if (boundary == null) {
+                System.err.println("Could not extract boundary from Content-Type");
+                parts = Collections.emptyList();
+                return;
+            }
 
-            parts = parseMultipartBody(new ByteArrayInputStream(bodyBytes), boundary);
+            System.out.println("Найдена граница (boundary): " + boundary);
+            boundary = "--" + boundary;
+
+            // Используем исправленный алгоритм для разбора multipart
+            parts = parseMultipartData(boundary);
         } catch (Exception e) {
             System.err.println("Multipart parse error: " + e.getMessage());
+            e.printStackTrace(); // Добавим стек вызовов для лучшей диагностики
             parts = Collections.emptyList();
         }
     }
 
-    private List<Part> parseMultipartBody(InputStream input, String boundary) throws IOException {
-        List<Part> parsedParts = new ArrayList<>();
-        byte[] boundaryBytes = boundary.getBytes(StandardCharsets.US_ASCII);
-        BufferedReader reader = new BufferedReader(new InputStreamReader(input));
+    private List<Part> parseMultipartData(String boundary) {
+        List<Part> resultParts = new ArrayList<>();
 
-        String line;
-        while ((line = reader.readLine()) != null) {
-            if (line.contains(boundary)) {
-                Map<String, String> headers = readPartHeaders(reader);
-                String fieldName = extractFieldName(headers);
-                if (fieldName != null) {
-                    ByteArrayOutputStream content = readPartContent(reader, boundary);
-                    String fileName = extractFileName(headers);
+        try {
+            // Ищем все границы в байтовом массиве (более надежный способ)
+            List<Integer> boundaryPositions = findBoundaryPositions(bodyBytes, boundary.getBytes(StandardCharsets.UTF_8));
 
-                    parsedParts.add(new Part(
-                            fieldName,
-                            fileName,
-                            headers.get("content-type"),
-                            content.toByteArray(),
-                            fileName != null
-                    ));
+            if (boundaryPositions.size() < 2) {
+                System.out.println("Не найдены позиции границ или их недостаточно");
+                return resultParts;
+            }
+
+            System.out.println("Найдено " + (boundaryPositions.size() - 1) + " частей по разделителю");
+
+            // Обрабатываем все части между границами
+            for (int i = 0; i < boundaryPositions.size() - 1; i++) {
+                int start = boundaryPositions.get(i);
+                int end = boundaryPositions.get(i + 1);
+
+                // Пропускаем первую часть (преамбула)
+                if (i == 0) continue;
+
+                // Проверяем, не является ли это последней границей
+                if (end - start > 4) {
+                    byte[] checkBytes = new byte[4];
+                    System.arraycopy(bodyBytes, start, checkBytes, 0, 4);
+                    String check = new String(checkBytes, StandardCharsets.UTF_8);
+                    if (check.startsWith("--\r\n")) {
+                        continue;  // Пропускаем финальную границу
+                    }
+                }
+
+                // Ищем разделитель между заголовками и телом
+                byte[] headerEnd = "\r\n\r\n".getBytes(StandardCharsets.UTF_8);
+                int headerEndPos = findSequence(bodyBytes, headerEnd, start, end);
+
+                if (headerEndPos == -1) {
+                    System.out.println("Не найден разделитель заголовков для части " + i);
+                    continue;
+                }
+
+                // Извлекаем и парсим заголовки
+                byte[] headersBytes = Arrays.copyOfRange(bodyBytes, start, headerEndPos);
+                String headersText = new String(headersBytes, StandardCharsets.UTF_8);
+
+                // Пропускаем начальные символы новой строки, если они есть
+                if (headersText.startsWith("\r\n")) {
+                    headersText = headersText.substring(2);
+                }
+
+                Map<String, String> partHeaders = new HashMap<>();
+                String[] headerLines = headersText.split("\r\n");
+
+                for (String header : headerLines) {
+                    int colonIndex = header.indexOf(':');
+                    if (colonIndex > 0) {
+                        String name = header.substring(0, colonIndex).trim().toLowerCase();
+                        String value = header.substring(colonIndex + 1).trim();
+                        partHeaders.put(name, value);
+                        System.out.println("Заголовок части: " + name + " = " + value);
+                    }
+                }
+
+                // Извлекаем информацию из заголовков
+                String contentDisposition = partHeaders.get("content-disposition");
+                if (contentDisposition == null) {
+                    System.out.println("Content-Disposition отсутствует для части " + i);
+                    continue;
+                }
+
+                String fieldName = extractFieldName(contentDisposition);
+                String fileName = extractFileName(contentDisposition);
+                boolean isFile = (fileName != null && !fileName.isEmpty());
+                String contentType = partHeaders.get("content-type");
+
+                System.out.println("Разбор части: fieldName=" + fieldName + ", fileName=" + fileName + ", isFile=" + isFile);
+
+                // Извлекаем тело части (контент) напрямую из байтов
+                // +4 для пропуска \r\n\r\n
+                int contentStart = headerEndPos + 4;
+                int contentEnd = end - 2; // -2 для пропуска \r\n в конце
+
+                if (contentEnd > contentStart) {
+                    byte[] content = Arrays.copyOfRange(bodyBytes, contentStart, contentEnd);
+
+                    resultParts.add(new Part(fieldName, fileName, contentType, content, isFile));
+                } else {
+                    System.out.println("Пустой контент для части " + i);
+                    resultParts.add(new Part(fieldName, fileName, contentType, new byte[0], isFile));
                 }
             }
+
+        } catch (Exception e) {
+            System.err.println("Ошибка при разборе multipart данных: " + e.getMessage());
+            e.printStackTrace();
         }
 
-        return parsedParts;
+        return resultParts;
     }
 
-    private Map<String, String> readPartHeaders(BufferedReader reader) throws IOException {
-        Map<String, String> headers = new HashMap<>();
-        String line;
-        while ((line = reader.readLine()) != null && !line.isEmpty()) {
-            int colon = line.indexOf(':');
-            if (colon > 0) {
-                headers.put(
-                        line.substring(0, colon).trim().toLowerCase(),
-                        line.substring(colon + 1).trim()
-                );
+    // Вспомогательный метод для поиска всех позиций границ
+    private List<Integer> findBoundaryPositions(byte[] data, byte[] boundary) {
+        List<Integer> positions = new ArrayList<>();
+
+        // Ищем все вхождения boundary в data
+        for (int i = 0; i <= data.length - boundary.length; i++) {
+            boolean found = true;
+            for (int j = 0; j < boundary.length; j++) {
+                if (data[i + j] != boundary[j]) {
+                    found = false;
+                    break;
+                }
+            }
+
+            if (found) {
+                positions.add(i);
+                // Перескакиваем текущее совпадение
+                i += boundary.length - 1;
             }
         }
-        return headers;
+
+        return positions;
     }
 
-    private ByteArrayOutputStream readPartContent(BufferedReader reader, String boundary) throws IOException {
-        ByteArrayOutputStream content = new ByteArrayOutputStream();
-        String line;
-        while ((line = reader.readLine()) != null && !line.contains(boundary)) {
-            content.write(line.getBytes(StandardCharsets.UTF_8));
-            content.write("\r\n".getBytes());
+    // Вспомогательный метод для поиска последовательности байтов
+    private int findSequence(byte[] data, byte[] seq, int startPos, int endPos) {
+        for (int i = startPos; i <= endPos - seq.length; i++) {
+            boolean found = true;
+            for (int j = 0; j < seq.length; j++) {
+                if (data[i + j] != seq[j]) {
+                    found = false;
+                    break;
+                }
+            }
+
+            if (found) {
+                return i;
+            }
         }
-        return content;
+
+        return -1;
     }
 
     private String extractBoundary(String contentType) {
-        String[] parts = contentType.split(";");
-        for (String part : parts) {
-            part = part.trim();
-            if (part.startsWith("boundary=")) {
-                return part.substring("boundary=".length()).trim();
+        int boundaryIndex = contentType.indexOf("boundary=");
+        if (boundaryIndex == -1) return null;
+
+        String boundary = contentType.substring(boundaryIndex + "boundary=".length());
+        if (boundary.startsWith("\"") && boundary.endsWith("\"")) {
+            boundary = boundary.substring(1, boundary.length() - 1);
+        } else {
+            // Если нет кавычек, отрезаем до следующего разделителя (если есть)
+            int endIndex = boundary.indexOf(';');
+            if (endIndex > 0) {
+                boundary = boundary.substring(0, endIndex);
             }
         }
-        return null;
+
+        // Удаляем пробелы, если они есть
+        return boundary.trim();
     }
 
-    private boolean trySkipNextBoundary(InputStream input, byte[] boundary) throws IOException {
-        int boundaryPos = 0;
-        int b;
-
-        while ((b = input.read()) != -1) {
-            if (b == boundary[boundaryPos]) {
-                boundaryPos++;
-                if (boundaryPos == boundary.length) {
-                    return true; // Нашли следующий boundary
-                }
-            } else {
-                boundaryPos = 0;
-            }
+    private byte[] getBoundaryBytes(String contentType) {
+        String boundary = extractBoundary(contentType);
+        if (boundary == null) {
+            return null;
         }
-        return false; // Достигнут конец потока
+
+        // Добавляем префикс к границе
+        return ("--" + boundary).getBytes(StandardCharsets.UTF_8);
     }
 
-    private void skipUntilBoundary(InputStream input, byte[] boundary) throws IOException {
-        byte[] buffer = new byte[4096];
-        int boundaryPos = 0;
-        int bytesRead;
+    private String extractFieldName(String contentDisposition) {
+        int nameIndex = contentDisposition.indexOf("name=");
+        if (nameIndex == -1) return null;
 
-        while ((bytesRead = input.read(buffer)) != -1) {
-            for (int i = 0; i < bytesRead; i++) {
-                if (buffer[i] == boundary[boundaryPos]) {
-                    boundaryPos++;
-                    if (boundaryPos == boundary.length) {
-                        return; // Нашли boundary
-                    }
-                } else {
-                    boundaryPos = 0;
-                }
+        String name = contentDisposition.substring(nameIndex + "name=".length());
+        if (name.startsWith("\"")) {
+            int endQuote = name.indexOf("\"", 1);
+            if (endQuote != -1) {
+                name = name.substring(1, endQuote);
+            }
+        } else {
+            int endPos = name.indexOf(";");
+            if (endPos != -1) {
+                name = name.substring(0, endPos);
             }
         }
-        throw new IOException("Boundary not found");
+
+        return name;
     }
 
-    private Map<String, String> readHeaders(InputStream input) throws IOException {
-        Map<String, String> headers = new HashMap<>();
-        ByteArrayOutputStream headerBuf = new ByteArrayOutputStream();
-        int prev = -1;
-        int curr;
+    private String extractFileName(String contentDisposition) {
+        int fileNameIndex = contentDisposition.indexOf("filename=");
+        if (fileNameIndex == -1) return null;
 
-        while ((curr = input.read()) != -1) {
-            if (prev == '\r' && curr == '\n') {
-                byte[] lineBytes = headerBuf.toByteArray();
-                if (lineBytes.length == 0) {
-                    break; // Конец заголовков
-                }
-
-                String line = new String(lineBytes, StandardCharsets.US_ASCII);
-                int colon = line.indexOf(':');
-                if (colon > 0) {
-                    String name = line.substring(0, colon).trim().toLowerCase();
-                    String value = line.substring(colon + 1).trim();
-                    headers.put(name, value);
-                }
-
-                headerBuf.reset();
-                prev = -1;
-                continue;
+        String fileName = contentDisposition.substring(fileNameIndex + "filename=".length());
+        if (fileName.startsWith("\"")) {
+            int endQuote = fileName.indexOf("\"", 1);
+            if (endQuote != -1) {
+                fileName = fileName.substring(1, endQuote);
             }
-
-            if (prev != -1) {
-                headerBuf.write(prev);
-            }
-            prev = curr;
-        }
-
-        return headers;
-    }
-
-    private String extractFieldName(Map<String, String> headers) {
-        String disposition = headers.get("content-disposition");
-        if (disposition == null) return null;
-
-        String[] parts = disposition.split(";");
-        for (String part : parts) {
-            part = part.trim();
-            if (part.startsWith("name=")) {
-                String name = part.substring("name=".length());
-                if (name.startsWith("\"") && name.endsWith("\"")) {
-                    name = name.substring(1, name.length() - 1);
-                }
-                return name;
+        } else {
+            int endPos = fileName.indexOf(";");
+            if (endPos != -1) {
+                fileName = fileName.substring(0, endPos);
             }
         }
-        return null;
-    }
 
-    private String extractFileName(Map<String, String> headers) {
-        String disposition = headers.get("content-disposition");
-        if (disposition == null) return null;
-
-        String[] parts = disposition.split(";");
-        for (String part : parts) {
-            part = part.trim();
-            if (part.startsWith("filename=")) {
-                String name = part.substring("filename=".length());
-                if (name.startsWith("\"") && name.endsWith("\"")) {
-                    name = name.substring(1, name.length() - 1);
-                }
-                return name;
-            }
-        }
-        return null;
-    }
-
-    private void readPartBody(InputStream input, byte[] boundary, OutputStream output) throws IOException {
-        // Упрощенная реализация - в реальном коде нужно учитывать больше случаев
-        byte[] buf = new byte[4096];
-        int boundaryPos = 0;
-        int b;
-
-        while ((b = input.read()) != -1) {
-            if (b == boundary[boundaryPos]) {
-                boundaryPos++;
-                if (boundaryPos == boundary.length) {
-                    break; // Нашли boundary
-                }
-            } else {
-                if (boundaryPos > 0) {
-                    output.write(boundary, 0, boundaryPos);
-                    boundaryPos = 0;
-                }
-                output.write(b);
-            }
-        }
+        return fileName.isEmpty() ? null : fileName;
     }
 
     public Part getPart(String name) {
@@ -408,6 +436,7 @@ public class Request {
         private final String contentType;
         private final byte[] content;
         private final boolean isFile;
+        private Map<String, String> headers;
 
         public Part(String name, String fileName, String contentType, byte[] content, boolean isFile) {
             this.name = name;
@@ -415,6 +444,10 @@ public class Request {
             this.contentType = contentType;
             this.content = content;
             this.isFile = isFile;
+            this.headers = new HashMap<>();
+            if (contentType != null) {
+                headers.put("content-type", contentType);
+            }
         }
 
         public String getName() { return name; }
@@ -422,6 +455,7 @@ public class Request {
         public String getContentType() { return contentType; }
         public boolean isFile() { return isFile; }
         public long getSize() { return content.length; }
+        public Map<String, String> getHeaders() { return headers; }
 
         public InputStream getInputStream() {
             return new ByteArrayInputStream(content);

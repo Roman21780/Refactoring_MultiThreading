@@ -247,29 +247,68 @@ public class Main {
                     throw new IOException("Failed to create upload directory");
                 }
 
+                // Отладочная информация о запросе
+                System.out.println("Content-Type: " + request.getHeaders().getOrDefault("content-type", "не указан"));
+                System.out.println("Content-Length: " + request.getHeaders().getOrDefault("content-length", "не указан"));
+                System.out.println("Размер тела запроса: " + request.getBodyAsString().length() + " символов");
+
                 // Обработка частей
                 List<Map<String, Object>> items = new ArrayList<>();
+
+                // Отладочная информация
+                System.out.println("Обработка multipart запроса");
+                System.out.println("Количество частей: " + request.getParts().size());
 
                 for (Request.Part part : request.getParts()) {
                     Map<String, Object> item = new LinkedHashMap<>();
                     item.put("field", part.getName());
 
-                    if (part.isFile() && part.getFileName() != null) {
+                    System.out.println("\n--- Обработка части: " + part.getName() + " ---");
+                    System.out.println("Размер части: " + part.getSize() + " байт");
+                    System.out.println("Это файл: " + part.isFile());
+
+                    // Проверяем имя файла
+                    String fileName = part.getFileName();
+                    System.out.println("Имя файла: " + (fileName != null ? fileName : "null"));
+
+                    if (fileName != null) {
+                        System.out.println("Тип контента: " + part.getContentType());
+
                         // Сохранение файла
-                        String fileName = part.getFileName();
-                        String savedName = System.currentTimeMillis() + "_" + fileName;
-                        File file = new File(uploadDir, savedName);
+                        if (part.getSize() > 0) {
+                            String savedName = System.currentTimeMillis() + "_" + fileName;
+                            File file = new File(uploadDir, savedName);
 
-                        try (OutputStream fos = new FileOutputStream(file)) {
-                            fos.write(part.getBytes());
+                            try (FileOutputStream fos = new FileOutputStream(file);
+                                 InputStream partStream = part.getInputStream()) {
+
+                                byte[] buffer = new byte[8192];
+                                int bytesRead;
+                                long totalBytesWritten = 0;
+
+                                while ((bytesRead = partStream.read(buffer)) != -1) {
+                                    fos.write(buffer, 0, bytesRead);
+                                    totalBytesWritten += bytesRead;
+                                }
+
+                                System.out.println("Файл сохранен: " + file.getAbsolutePath());
+                                System.out.println("Записано байт: " + totalBytesWritten);
+
+                                item.put("type", "file");
+                                item.put("originalName", fileName);
+                                item.put("savedName", savedName);
+                                item.put("size", file.length());
+                                item.put("contentType", part.getContentType());
+                            }
+                        } else {
+                            System.out.println("Файл имеет нулевой размер");
+                            item.put("type", "file");
+                            item.put("originalName", fileName);
+                            item.put("size", 0);
+                            item.put("error", "Zero size file");
                         }
-
-                        item.put("type", "file");
-                        item.put("originalName", fileName);
-                        item.put("savedName", savedName);
-                        item.put("size", file.length());
-                        item.put("contentType", part.getContentType());
                     } else {
+                        System.out.println("Значение поля: " + part.getString());
                         item.put("type", "field");
                         item.put("value", part.getString());
                     }
@@ -286,6 +325,7 @@ public class Main {
                 Server.sendJsonResponse(out, 200, jsonResponse);
 
             } catch (Exception e) {
+                e.printStackTrace();  // Добавляем вывод стека для отладки
                 try {
                     Map<String, String> error = new LinkedHashMap<>();
                     error.put("status", "error");
