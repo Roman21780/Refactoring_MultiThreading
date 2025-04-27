@@ -239,6 +239,16 @@ public class Server {
         out.flush();
     }
 
+    public static void sendJsonResponse(OutputStream out, int status, String json) throws IOException {
+        String response = "HTTP/1.1 " + status + " OK\r\n" +
+                "Content-Type: application/json\r\n" +
+                "Content-Length: " + json.getBytes(StandardCharsets.UTF_8).length + "\r\n" +
+                "Connection: close\r\n\r\n" +
+                json;
+        out.write(response.getBytes(StandardCharsets.UTF_8));
+        out.flush();
+    }
+
     private static String getStatusText(int statusCode) {
         switch (statusCode) {
             case 200: return "OK";

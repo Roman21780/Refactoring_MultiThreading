@@ -1,8 +1,14 @@
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.http.NameValuePair;
 import org.apache.http.client.utils.URLEncodedUtils;
 
 import java.io.*;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
+import java.time.Instant;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -224,6 +230,72 @@ public class Main {
             } catch (Exception e) {
                 System.err.println("Error processing form: " + e.getMessage());
                 Server.sendResponse(out, 500, "Server error: " + e.getMessage());
+            }
+        });
+
+        server.addHandler("POST", "/upload", (request, out) -> {
+            try {
+                // Проверка multipart
+                if (!request.isMultipart()) {
+                    Server.sendResponse(out, 415, "Expected multipart/form-data");
+                    return;
+                }
+
+                // Подготовка директории
+                File uploadDir = new File("uploads");
+                if (!uploadDir.exists() && !uploadDir.mkdirs()) {
+                    throw new IOException("Failed to create upload directory");
+                }
+
+                // Обработка частей
+                List<Map<String, Object>> items = new ArrayList<>();
+
+                for (Request.Part part : request.getParts()) {
+                    Map<String, Object> item = new LinkedHashMap<>();
+                    item.put("field", part.getName());
+
+                    if (part.isFile() && part.getFileName() != null) {
+                        // Сохранение файла
+                        String fileName = part.getFileName();
+                        String savedName = System.currentTimeMillis() + "_" + fileName;
+                        File file = new File(uploadDir, savedName);
+
+                        try (OutputStream fos = new FileOutputStream(file)) {
+                            fos.write(part.getBytes());
+                        }
+
+                        item.put("type", "file");
+                        item.put("originalName", fileName);
+                        item.put("savedName", savedName);
+                        item.put("size", file.length());
+                        item.put("contentType", part.getContentType());
+                    } else {
+                        item.put("type", "field");
+                        item.put("value", part.getString());
+                    }
+                    items.add(item);
+                }
+
+                // Формирование ответа
+                Map<String, Object> response = new LinkedHashMap<>();
+                response.put("status", "success");
+                response.put("items", items);
+                response.put("count", items.size());
+
+                String jsonResponse = new ObjectMapper().writeValueAsString(response);
+                Server.sendJsonResponse(out, 200, jsonResponse);
+
+            } catch (Exception e) {
+                try {
+                    Map<String, String> error = new LinkedHashMap<>();
+                    error.put("status", "error");
+                    error.put("message", e.getMessage());
+
+                    String jsonError = new ObjectMapper().writeValueAsString(error);
+                    Server.sendJsonResponse(out, 500, jsonError);
+                } catch (IOException ioEx) {
+                    System.err.println("Failed to send error: " + ioEx.getMessage());
+                }
             }
         });
 
