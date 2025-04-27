@@ -35,6 +35,9 @@ public class Request {
         this.path = path.split("\\?", 2)[0];
         this.headers = Collections.unmodifiableMap(headers);
         this.bodyBytes = body != null ? body.readAllBytes() : new byte[0];
+
+        // парсим query параметры в конструкторе
+        parseQueryParams();
     }
 
     // ========== Multipart обработка ==========
@@ -44,7 +47,7 @@ public class Request {
         return contentType != null && contentType.startsWith("multipart/form-data");
     }
 
-    private synchronized void parseMultipart() {
+    private void parseMultipart() {
         if (multipartParsed) return;
         multipartParsed = true;
 
@@ -322,7 +325,7 @@ public class Request {
         return contentType != null && contentType.contains("x-www-form-urlencoded");
     }
 
-    private synchronized void parsePostParamsIfNeeded() {
+    private void parsePostParamsIfNeeded() {
         if (postParamsParsed) return;
         postParamsParsed = true;
 
@@ -375,33 +378,36 @@ public class Request {
         return getPostParams().containsKey(name);
     }
 
-    // Методы для работы с query параметрами
-    public synchronized Map<String, List<String>> getQueryParams() {
-        if (queryParams == null) {
-            queryParams = new HashMap<>();
-            for (NameValuePair pair : getQueryParamsList()) {
-                queryParams.computeIfAbsent(pair.getName(), k -> new ArrayList<>())
-                        .add(pair.getValue());
+    private void parseQueryParams() {
+        queryParams = new HashMap<>();
+        queryParamsList = new ArrayList<>();
+
+        if (rawPath.contains("?")) {
+            String query = rawPath.substring(rawPath.indexOf('?') + 1);
+            try {
+                List<NameValuePair> parsed = URLEncodedUtils.parse(query, StandardCharsets.UTF_8);
+                for (NameValuePair pair : parsed) {
+                    queryParams.computeIfAbsent(pair.getName(), k -> new ArrayList<>())
+                            .add(pair.getValue());
+                    queryParamsList.add(pair);
+                }
+            } catch (Exception e) {
+                System.err.println("Error parsing query parameters: " + e.getMessage());
             }
-            queryParams.replaceAll((k, v) -> Collections.unmodifiableList(v));
-            queryParams = Collections.unmodifiableMap(queryParams);
         }
+
+        queryParams.replaceAll((k, v) -> Collections.unmodifiableList(v));
+        queryParams = Collections.unmodifiableMap(queryParams);
+        queryParamsList = Collections.unmodifiableList(queryParamsList);
+    }
+
+
+    // Методы для работы с query параметрами
+    public Map<String, List<String>> getQueryParams() {
         return queryParams;
     }
 
-    public synchronized List<NameValuePair> getQueryParamsList() {
-        if (queryParamsList == null) {
-            try {
-                String query = rawPath.contains("?") ? rawPath.substring(rawPath.indexOf('?') + 1) : "";
-                queryParamsList = query.isEmpty() ?
-                        Collections.emptyList() :
-                        URLEncodedUtils.parse(query, StandardCharsets.UTF_8);
-            } catch (Exception e) {
-                System.err.println("Error parsing query parameters: " + e.getMessage());
-                queryParamsList = Collections.emptyList();
-            }
-            queryParamsList = Collections.unmodifiableList(queryParamsList);
-        }
+    public List<NameValuePair> getQueryParamsList() {
         return queryParamsList;
     }
 
